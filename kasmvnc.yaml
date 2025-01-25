@@ -9,14 +9,14 @@ network:
     port: auto
     stun_server: null
   ssl:
-    pem_certificate: /config/ssl/cert.pem
-    pem_key: /config/ssl/cert.key
+    pem_certificate: KASM_HOME/config/ssl/cert.pem
+    pem_key: KASM_HOME/config/ssl/cert.key
     require_ssl: false
 
 logging:
   log_writer_name: all
   log_dest: logfile
-  level: 1
+  level: 4
 
 command_line:
   prompt: false

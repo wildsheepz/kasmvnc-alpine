@@ -1,2 +1,3 @@
 #!/usr/bin/env bash
-kill -9 `pgrep -U user -f '/opt/kasmbins|kasm_(audio|upload|gamepad|printer|webcam)|Xvnc|dbus-daemon|ffmpeg|nginx'`
+CUSER="${CUSTOM_USER:-user}"
+kill -9 `pgrep -U $CUSER -f '/opt/kasmbins|kasm_(audio|upload|gamepad|printer|webcam)|Xvnc|dbus-daemon|ffmpeg|nginx'`

@@ -122,7 +122,7 @@ wget https://github.com/wildsheepz/kasmvnc-alpine/releases/download/$TAG/scripts
 sudo tar -xvf scripts.tgz -C /opt/kasm && rm scripts.tgz
 cat /opt/kasm/kasmvnc.service.template | CUSER=$CUSER envsubst | sudo tee /opt/kasm/kasmvnc.service
 sudo ln -sf /opt/kasm/kasmvnc.service /etc/systemd/system/kasmvnc.service
-sudo mv /opt/kasm/kasmvnc.yaml /usr/local/etc/kasmvnc
+sed "s|KASM_HOME|/home/${CUSER}/.vnc/kasm|g" /opt/kasm/kasmvnc.yaml | sudo tee /usr/local/etc/kasmvnc
 
 # sudo cp node-v18.20.6-linux-x64.tar.xz /usr/local/nvm/versions/node
 sudo wget https://nodejs.org/dist/v18.20.6/node-v18.20.6-linux-x64.tar.xz -O /usr/local/nvm/versions/node/node-v18.20.6-linux-x64.tar.xz

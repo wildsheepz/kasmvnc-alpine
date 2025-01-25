@@ -3,12 +3,12 @@ scriptDir=`dirname -- "$0"`
 (
 	cd $scriptDir
 	set -e
-
+	DISABLE_IPV6=1
 	DISPLAY_NUM="${DISPLAY_NUM:-10}"
 	DISPLAY=:$DISPLAY_NUM
 	DEBUG="${DEBUG:-false}"
 	CPORT="${CUSTOM_PORT:-6080}"
-	CUSER="${CUSTOM_USER:-user}"
+	CUSER="${CUSTOM_USER:-$USER}"
 	APP_NAME=$(basename "$0")
 
 	log () {
@@ -34,12 +34,11 @@ scriptDir=`dirname -- "$0"`
 	for process in "${!KASM_PROCS[@]}"; do
 		(
 		set -x
-		sudo kill "${KASM_PROCS[$process]}" 2> /dev/null || true
+		kill "${KASM_PROCS[$process]}" 2> /dev/null || true
 		)
 	done
 	sleep 3
-	sudo kill -9 `pgrep -U ${CUSER} -f '/opt/kasmbins|kasm_(audio|upload|gamepad|printer|webcam)|Xvnc|dbus-daemon|ffmpeg|nginx'` 2>/dev/null || true
-	sudo rm -rf /tmp/{,.[!.],..?}* || :
+	kill -9 `pgrep -U ${CUSER} -f '/opt/kasmbins|kasm_(audio|upload|gamepad|printer|webcam)|Xvnc|dbus-daemon|ffmpeg|nginx'` 2>/dev/null || true
 	}
 	trap clean SIGINT SIGTERM
 	clean
@@ -58,8 +57,14 @@ scriptDir=`dirname -- "$0"`
 
 	# Environment
 	export HOME=/home/${CUSER}
+	export KASM_HOME=$HOME/.vnc/kasm
 	export KASM_VNC_PATH=/usr/local/share/kasmvnc
-	export PULSE_RUNTIME_PATH=/var/run/pulse
+	export PULSE_RUNTIME_PATH=$KASM_HOME/pulse
+	export de_was_selected_file="$HOME/.vnc/.de-was-selected"
+
+	mkdir -p $KASM_HOME
+	mkdir -p $PULSE_RUNTIME_PATH
+
 	if [ -z ${DRINODE+x} ]; then
 	DRINODE="/dev/dri/renderD128"
 	fi
@@ -69,42 +74,41 @@ scriptDir=`dirname -- "$0"`
 	fi
 
 
-	if [ ! -f "/config/ssl/cert.pem" ]; then
-		sudo mkdir -p /config/ssl
-		sudo openssl req -new -x509 \
+	if [ ! -f "$KASM_HOME/config/ssl/cert.pem" ]; then
+		mkdir -p $KASM_HOME/config/ssl
+		openssl req -new -x509 \
 		-days 3650 -nodes \
-		-out /config/ssl/cert.pem \
-		-keyout /config/ssl/cert.key \
+		-out $KASM_HOME/config/ssl/cert.pem \
+		-keyout $KASM_HOME/config/ssl/cert.key \
 		-subj "/C=US/ST=CA/L=Carlsbad/O=Linuxserver.io/OU=LSIO Server/CN=*"
-		sudo chmod 600 /config/ssl/cert.key
-		sudo chown -R ${CUSER}:user /config/ssl
+		chmod 600 $KASM_HOME/config/ssl/cert.key
 	fi
 
 	mkdir -p $HOME/.vnc
 	openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout ${HOME}/.vnc/self.pem -out ${HOME}/.vnc/self.pem -subj "/C=US/ST=VA/L=None/O=None/OU=DoFu/CN=kasm/emailAddress=none@none.none"
-	PASSWD_PATH="$HOME/.kasmpasswd"
+	PASSWD_PATH="$KASM_HOME/.kasmpasswd"
 	if [[ -f $PASSWD_PATH ]]; then
 		echo -e "\n---------  purging existing VNC password settings  ---------"
 		rm -f $PASSWD_PATH
 	fi
-
+	touch "$de_was_selected_file"
 	rm -f $HOME/.vnc/xstartup
 	rm -f $HOME/.xsession
-# 	cat << 'END' > $HOME/.vnc/xstartup
-# #!/bin/sh
-# xrdb /home/${CUSER}/.Xresources
-# startxfce4 &
-# END
-	# chmod +x $HOME/.vnc/xstartup
-	echo "xfce4-session" > ~/.xsession
-	chmod +x ~/.xsession
+	cat << 'END' > $HOME/.vnc/xstartup
+#!/bin/sh
+xfce4-session &
+END
+	chmod +x $HOME/.vnc/xstartup
+	# echo "plasma_session" > ~/.xsession
+	# chmod +x ~/.xsession
+
 
 	if [[ -z ${VNC_PW+x} ]]; then
 	VNC_PW="vncpassword"
 	fi
 
-	echo -e "${VNC_PW}\n${VNC_PW}\n" | kasmvncpasswd -u kasm_user -wo
-	echo -e "${VNC_PW}\n${VNC_PW}\n" | kasmvncpasswd -u kasm_viewer -r
+	echo -e "${VNC_PW}\n${VNC_PW}\n" | kasmvncpasswd -u kasm_user -wo $PASSWD_PATH
+	echo -e "${VNC_PW}\n${VNC_PW}\n" | kasmvncpasswd -u kasm_viewer -r $PASSWD_PATH
 	chmod 600 $PASSWD_PATH
 
 	function start_kasmvnc (){
@@ -123,6 +127,7 @@ scriptDir=`dirname -- "$0"`
 		-DLP_ClipDelay=0 \
 		-sslOnly 0 \
 		-DisableBasicAuth \
+		-UseIPv6 0
 
 	KASM_PROCS['kasmvnc']=$(cat $HOME/.vnc/*${DISPLAY_NUM}.pid)
 
@@ -164,16 +169,16 @@ scriptDir=`dirname -- "$0"`
 			if [ "${START_PULSEAUDIO:-1}" == "1" ] ;
 			then
 				echo "Starting Pulse"
-				HOME=/var/run/pulse pulseaudio --start
+				HOME=$PULSE_RUNTIME_PATH pulseaudio --start
 			fi
 
 			if [[ $DEBUG == true ]]; then
 				echo 'Starting audio service in debug mode'
-				HOME=/var/run/pulse no_proxy=127.0.0.1 ffmpeg -f pulse -fragment_size ${PULSEAUDIO_FRAGMENT_SIZE:-2000} -ar 44100 -i default -f mpegts -correct_ts_overflow 0 -codec:a mp2 -b:a 128k -ac 1 -muxdelay 0.001 http://127.0.0.1:8081/kasmaudio &
+				HOME=$PULSE_RUNTIME_PATH no_proxy=127.0.0.1 ffmpeg -f pulse -fragment_size ${PULSEAUDIO_FRAGMENT_SIZE:-2000} -ar 44100 -i default -f mpegts -correct_ts_overflow 0 -codec:a mp2 -b:a 128k -ac 1 -muxdelay 0.001 http://127.0.0.1:8081/kasmaudio &
 				KASM_PROCS['kasm_audio_out']=$!
 			else
 				echo 'Starting audio service'
-				HOME=/var/run/pulse no_proxy=127.0.0.1 ffmpeg -v verbose -f pulse -fragment_size ${PULSEAUDIO_FRAGMENT_SIZE:-2000} -ar 44100 -i default -f mpegts -correct_ts_overflow 0 -codec:a mp2 -b:a 128k -ac 1 -muxdelay 0.001 http://127.0.0.1:8081/kasmaudio > /dev/null 2>&1 &
+				HOME=$PULSE_RUNTIME_PATH no_proxy=127.0.0.1 ffmpeg -v verbose -f pulse -fragment_size ${PULSEAUDIO_FRAGMENT_SIZE:-2000} -ar 44100 -i default -f mpegts -correct_ts_overflow 0 -codec:a mp2 -b:a 128k -ac 1 -muxdelay 0.001 http://127.0.0.1:8081/kasmaudio > /dev/null 2>&1 &
 				KASM_PROCS['kasm_audio_out']=$!
 				echo -e "\n------------------ Started Audio Out  ----------------------------"
 				echo "Kasm Audio Out PID: ${KASM_PROCS['kasm_audio_out']}";
@@ -209,84 +214,34 @@ scriptDir=`dirname -- "$0"`
 		fi
 	}
 
-
-	function ensure_recorder_running () {
-		if [[ ${KASM_SVC_RECORDER:-0} != 1 ]]; then
-			return
-		fi
-
-		local kasm_recorder_process="/dockerstartup/recorder/kasm_recorder_service"
-		local kasm_recorder_ack="/tmp/kasm_recorder.ack"
-
-		if [[ -f "$kasm_recorder_ack" ]]; then
-			local ack_user=$(stat -c '%U' $kasm_recorder_ack)
-			if [[ "$ack_user" == "kasm-recorder" ]]; then
-				SECONDS=0  #SECONDS is a built in bash variable that is incremented approximately every second
-				kasm_recorder_pid=""
-			fi
-		fi
-
-		local recorder_pid=$(pgrep -f "^$kasm_recorder_process") || true
-
-		if [[ -z $kasm_recorder_pid ]]; then
-			# This leverages the outside while loop that calls this function to provider checking ever x seconds.
-			if [[ -z $recorder_pid ]] && (( $SECONDS > 15 )); then
-				log "$kasm_recorder_process: not started, exiting" "ERROR"
-				exit 0
-			fi
-
-			kasm_recorder_pid=$recorder_pid
-		else
-			if [[ -z $recorder_pid ]]; then
-				log "$kasm_recorder_process: not running, exiting" "ERROR"
-				exit 0
-			fi
-
-			recorder_user=$(ps -p $recorder_pid -o user=)
-			if [[ $recorder_user != "kasm-recorder" ]]; then
-				log "$kasm_recorder_process: not running as kasm-recorder, exiting" "ERROR"
-				exit 0
-			fi
-		fi
-	}
-
-	function ensure_recorder_terminates_gracefully () {
-	local kasm_recorder_process="/dockerstartup/recorder/kasm_recorder_service"
-
-	while true
-	do
-		recorder_pid=$(pgrep -f "$kasm_recorder_process") || true
-		if [[ -z $recorder_pid ]]; then
-		break
-		fi
-
-		sleep 1
-	done
-	}
-
 	function start_nginx(){
 		echo start_nginx
 		log "Starting NGINX" "INFO"
-		NGINX_CONFIG=/etc/nginx/sites-available/default
+		NGINX_CONFIG=$KASM_HOME/nginx.conf
+		NGINX_SITE_CONFIG=$KASM_HOME/default.conf
 		# user passed env vars
 		CHPORT="${CUSTOM_HTTPS_PORT:-3001}"
-		
 		SFOLDER="${SUBFOLDER:-/}"
-		sudo chown 1001 -R /var/log/nginx /var/lib/nginx
-		sudo cp ./default.conf.template ${NGINX_CONFIG}
-		sudo sed -i "s/3000/$CPORT/g" ${NGINX_CONFIG}
-		sudo sed -i "s/3001/$CHPORT/g" ${NGINX_CONFIG}
-		sudo sed -i "s|SUBFOLDER|$SFOLDER|g" ${NGINX_CONFIG}
+		cp ./nginx.conf.template ${NGINX_CONFIG}
+
+		cp ./default.conf.template ${NGINX_SITE_CONFIG}
+		
+		sed -i "s|KASM_HOME|$KASM_HOME|g" ${NGINX_SITE_CONFIG}
+		sed -i "s|KASM_HOME|$KASM_HOME|g" ${NGINX_CONFIG}
+
+		sed -i "s/3000/$CPORT/g" ${NGINX_SITE_CONFIG}
+		sed -i "s/3001/$CHPORT/g" ${NGINX_SITE_CONFIG}
+		sed -i "s|SUBFOLDER|$SFOLDER|g" ${NGINX_SITE_CONFIG}
 
 		if [ ! -z ${DISABLE_IPV6+x} ]; then
-		sudo sed -i '/listen \[::\]/d' ${NGINX_CONFIG}
+			sed -i '/listen \[::\]/d' ${NGINX_SITE_CONFIG}
 		fi
 		if [ ! -z ${PASSWORD+x} ]; then
-		printf "${CUSER}:$(openssl passwd -apr1 ${PASSWORD})\n" | sudo tee /etc/nginx/.htpasswd
-		sudo sed -i 's/#//g' ${NGINX_CONFIG}
+			printf "${CUSER}:$(openssl passwd -apr1 ${PASSWORD})\n" | tee $KASM_HOME/.htpasswd
+			sed -i 's/#//g' ${NGINX_SITE_CONFIG}
 		fi
 
-		/usr/sbin/nginx -c `pwd`/nginx.conf & 
+		/usr/sbin/nginx -c $NGINX_CONFIG & 
 		KASM_PROCS['nginx']=$!
 	}
 

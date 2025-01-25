@@ -87,7 +87,7 @@ jobs:
       - name: package the scripts
         run: |-
           ls -lah
-          tar -cvf scripts.tgz kasminit kasmvnc.yaml default.conf.template nginx.conf kasmvnc.service.template killall.sh install.sh ps.sh
+          tar -cvf scripts.tgz kasminit kasmvnc.yaml default.conf.template nginx.conf.template kasmvnc.service.template killall.sh install.sh ps.sh
 
       - name: Get the tag name
         if: ${{ inputs.tag }} != ''
