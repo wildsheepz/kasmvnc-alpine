@@ -1,0 +1,391 @@
+#!/usr/bin/env bash
+scriptDir=`dirname -- "$0"`
+(
+	cd $scriptDir
+	set -e
+
+	DISPLAY_NUM="${DISPLAY_NUM:-10}"
+	DISPLAY=:$DISPLAY_NUM
+	DEBUG="${DEBUG:-false}"
+	CPORT="${CUSTOM_PORT:-6080}"
+	CUSER="${CUSTOM_USER:-user}"
+	APP_NAME=$(basename "$0")
+
+	log () {
+		if [ ! -z "${1}" ]; then
+			LOG_LEVEL="${2:-DEBUG}"
+			INGEST_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+			echo "${INGEST_DATE} ${LOG_LEVEL} (${APP_NAME}): $1"
+			if [ ! -z "${KASM_API_JWT}" ]  && [ ! -z "${KASM_API_HOST}" ]  && [ ! -z "${KASM_API_PORT}" ]; then
+				set +e
+				http_proxy="" https_proxy="" curl https://${KASM_API_HOST}:${KASM_API_PORT}/api/kasm_session_log?token=${KASM_API_JWT} --max-time 1 -X POST -H 'Content-Type: application/json' -d '[{ "host": "'"${KASM_ID}"'", "application": "Session", "ingest_date": "'"${INGEST_DATE}"'", "message": "'"$1"'", "levelname": "'"${LOG_LEVEL}"'", "process": "'"${APP_NAME}"'", "kasm_user_name": "'"${KASM_USER_NAME}"'", "kasm_id": "'"${KASM_ID}"'" }]' -k -s
+				set -e
+			fi
+		fi
+	}
+
+
+	# dict to store processes
+	declare -A KASM_PROCS
+
+
+	# Purge temp files on init and exit
+	function clean () {
+	for process in "${!KASM_PROCS[@]}"; do
+		(
+		set -x
+		sudo kill "${KASM_PROCS[$process]}" 2> /dev/null || true
+		)
+	done
+	sleep 3
+	sudo kill -9 `pgrep -U ${CUSER} -f '/opt/kasmbins|kasm_(audio|upload|gamepad|printer|webcam)|Xvnc|dbus-daemon|ffmpeg|nginx'` 2>/dev/null || true
+	sudo rm -rf /tmp/{,.[!.],..?}* || :
+	}
+	trap clean SIGINT SIGTERM
+	clean
+
+	export LC_ALL=en_US.UTF-8
+	export LANG=en_US.UTF-8
+	export LANGUAGE=en_US:en
+	# Dbus
+	export $(dbus-launch)
+
+	# Lang
+	if [ ! -z ${LC_ALL+x} ]; then
+	export LANGUAGE="${LC_ALL%.UTF-8}"
+	export LANG="${LC_ALL}"
+	fi
+
+	# Environment
+	export HOME=/home/${CUSER}
+	export KASM_VNC_PATH=/usr/local/share/kasmvnc
+	export PULSE_RUNTIME_PATH=/var/run/pulse
+	if [ -z ${DRINODE+x} ]; then
+	DRINODE="/dev/dri/renderD128"
+	fi
+	KASMNVC_HW3D=''
+	if [ ! -z ${HW3D+x} ]; then
+	KASMVNC_HW3D="-hw3d"
+	fi
+
+
+	if [ ! -f "/config/ssl/cert.pem" ]; then
+		sudo mkdir -p /config/ssl
+		sudo openssl req -new -x509 \
+		-days 3650 -nodes \
+		-out /config/ssl/cert.pem \
+		-keyout /config/ssl/cert.key \
+		-subj "/C=US/ST=CA/L=Carlsbad/O=Linuxserver.io/OU=LSIO Server/CN=*"
+		sudo chmod 600 /config/ssl/cert.key
+		sudo chown -R ${CUSER}:user /config/ssl
+	fi
+
+	mkdir -p $HOME/.vnc
+	openssl req -x509 -nodes -days 3650 -newkey rsa:2048 -keyout ${HOME}/.vnc/self.pem -out ${HOME}/.vnc/self.pem -subj "/C=US/ST=VA/L=None/O=None/OU=DoFu/CN=kasm/emailAddress=none@none.none"
+	PASSWD_PATH="$HOME/.kasmpasswd"
+	if [[ -f $PASSWD_PATH ]]; then
+		echo -e "\n---------  purging existing VNC password settings  ---------"
+		rm -f $PASSWD_PATH
+	fi
+
+	rm -f $HOME/.vnc/xstartup
+	rm -f $HOME/.xsession
+# 	cat << 'END' > $HOME/.vnc/xstartup
+# #!/bin/sh
+# xrdb /home/${CUSER}/.Xresources
+# startxfce4 &
+# END
+	# chmod +x $HOME/.vnc/xstartup
+	echo "xfce4-session" > ~/.xsession
+	chmod +x ~/.xsession
+
+	if [[ -z ${VNC_PW+x} ]]; then
+	VNC_PW="vncpassword"
+	fi
+
+	echo -e "${VNC_PW}\n${VNC_PW}\n" | kasmvncpasswd -u kasm_user -wo
+	echo -e "${VNC_PW}\n${VNC_PW}\n" | kasmvncpasswd -u kasm_viewer -r
+	chmod 600 $PASSWD_PATH
+
+	function start_kasmvnc (){
+	vncserver $DISPLAY \
+		$KASMVNC_HW3D \
+		-drinode $DRINODE \
+		-websocketPort 6901 \
+		-httpd ${KASM_VNC_PATH}/www \
+		-FrameRate=60 \
+		-interface 0.0.0.0 \
+		-BlacklistThreshold=0 \
+		-FreeKeyMappings \
+		-PreferBandwidth \
+		-DynamicQualityMin=4 \
+		-DynamicQualityMax=7 \
+		-DLP_ClipDelay=0 \
+		-sslOnly 0 \
+		-DisableBasicAuth \
+
+	KASM_PROCS['kasmvnc']=$(cat $HOME/.vnc/*${DISPLAY_NUM}.pid)
+
+		if [[ $DEBUG == true ]]; then
+		echo -e "\n------------------ Started Websockify  ----------------------------"
+		echo "Websockify PID: ${KASM_PROCS['kasmvnc']}";
+		fi
+	}
+	# function start_window_manager (){
+	# 	echo -e "\n------------------ Xfce4 window manager startup------------------"
+	# 		if [ -f /opt/VirtualGL/bin/vglrun ] && [ ! -z "${KASM_EGL_CARD}" ] && [ ! -z "${KASM_RENDERD}" ] && [ -O "${KASM_RENDERD}" ] && [ -O "${KASM_EGL_CARD}" ] ; then
+	# 		echo "Starting XFCE with VirtualGL using EGL device ${KASM_EGL_CARD}"
+	# 			DISPLAY=$DISPLAY /opt/VirtualGL/bin/vglrun -d "${KASM_EGL_CARD}" $WM &
+	# 		else
+	# 			echo "Starting XFCE"
+	# 			# DISPLAY=$DISPLAY $WM &
+	# 		fi
+	# 		KASM_PROCS['window_manager']=$!
+	# }
+
+	function start_audio_out_websocket (){
+		if [[ ${KASM_SVC_AUDIO:-1} == 1 ]]; then
+			echo 'Starting audio websocket server'
+			/opt/kasmbins/kasm_websocket_relay/kasm_audio_out-linux kasmaudio 8081 4901 ${HOME}/.vnc/self.pem ${HOME}/.vnc/self.pem "kasm_user:$VNC_PW"  &
+
+			KASM_PROCS['kasm_audio_out_websocket']=$!
+
+			if [[ $DEBUG == true ]]; then
+			echo -e "\n------------------ Started Audio Out Websocket  ----------------------------"
+			echo "Kasm Audio Out Websocket PID: ${KASM_PROCS['kasm_audio_out_websocket']}";
+			fi
+		fi
+	}
+
+	function start_audio_out (){
+		if [[ ${KASM_SVC_AUDIO:-1} == 1 ]]; then
+			echo 'Starting audio server'
+
+			if [ "${START_PULSEAUDIO:-1}" == "1" ] ;
+			then
+				echo "Starting Pulse"
+				HOME=/var/run/pulse pulseaudio --start
+			fi
+
+			if [[ $DEBUG == true ]]; then
+				echo 'Starting audio service in debug mode'
+				HOME=/var/run/pulse no_proxy=127.0.0.1 ffmpeg -f pulse -fragment_size ${PULSEAUDIO_FRAGMENT_SIZE:-2000} -ar 44100 -i default -f mpegts -correct_ts_overflow 0 -codec:a mp2 -b:a 128k -ac 1 -muxdelay 0.001 http://127.0.0.1:8081/kasmaudio &
+				KASM_PROCS['kasm_audio_out']=$!
+			else
+				echo 'Starting audio service'
+				HOME=/var/run/pulse no_proxy=127.0.0.1 ffmpeg -v verbose -f pulse -fragment_size ${PULSEAUDIO_FRAGMENT_SIZE:-2000} -ar 44100 -i default -f mpegts -correct_ts_overflow 0 -codec:a mp2 -b:a 128k -ac 1 -muxdelay 0.001 http://127.0.0.1:8081/kasmaudio > /dev/null 2>&1 &
+				KASM_PROCS['kasm_audio_out']=$!
+				echo -e "\n------------------ Started Audio Out  ----------------------------"
+				echo "Kasm Audio Out PID: ${KASM_PROCS['kasm_audio_out']}";
+			fi
+		fi
+	}
+
+	function start_audio_in (){
+		if [[ ${KASM_SVC_AUDIO_INPUT:-1} == 1 ]]; then
+			echo 'Starting audio input server'
+			/opt/kasmbins/kasm_audio_input_server --ssl --auth-token "kasm_user:$VNC_PW" --cert ${HOME}/.vnc/self.pem --certkey ${HOME}/.vnc/self.pem &
+
+			KASM_PROCS['kasm_audio_in']=$!
+
+			if [[ $DEBUG == true ]]; then
+				echo -e "\n------------------ Started Audio Out Websocket  ----------------------------"
+				echo "Kasm Audio In PID: ${KASM_PROCS['kasm_audio_in']}";
+			fi
+		fi
+	}
+
+	function start_upload (){
+		if [[ ${KASM_SVC_UPLOADS:-1} == 1 ]]; then
+			echo 'Starting upload server'
+			/opt/kasmbins/kasm_upload_server --ssl --auth-token "kasm_user:$VNC_PW" --port 4902 --upload_dir ${HOME}/Uploads &
+
+			KASM_PROCS['upload_server']=$!
+
+			if [[ $DEBUG == true ]]; then
+				echo -e "\n------------------ Started Upload Server  ----------------------------"
+				echo "Upload Server PID: ${KASM_PROCS['upload_server']}";
+			fi
+		fi
+	}
+
+
+	function ensure_recorder_running () {
+		if [[ ${KASM_SVC_RECORDER:-0} != 1 ]]; then
+			return
+		fi
+
+		local kasm_recorder_process="/dockerstartup/recorder/kasm_recorder_service"
+		local kasm_recorder_ack="/tmp/kasm_recorder.ack"
+
+		if [[ -f "$kasm_recorder_ack" ]]; then
+			local ack_user=$(stat -c '%U' $kasm_recorder_ack)
+			if [[ "$ack_user" == "kasm-recorder" ]]; then
+				SECONDS=0  #SECONDS is a built in bash variable that is incremented approximately every second
+				kasm_recorder_pid=""
+			fi
+		fi
+
+		local recorder_pid=$(pgrep -f "^$kasm_recorder_process") || true
+
+		if [[ -z $kasm_recorder_pid ]]; then
+			# This leverages the outside while loop that calls this function to provider checking ever x seconds.
+			if [[ -z $recorder_pid ]] && (( $SECONDS > 15 )); then
+				log "$kasm_recorder_process: not started, exiting" "ERROR"
+				exit 0
+			fi
+
+			kasm_recorder_pid=$recorder_pid
+		else
+			if [[ -z $recorder_pid ]]; then
+				log "$kasm_recorder_process: not running, exiting" "ERROR"
+				exit 0
+			fi
+
+			recorder_user=$(ps -p $recorder_pid -o user=)
+			if [[ $recorder_user != "kasm-recorder" ]]; then
+				log "$kasm_recorder_process: not running as kasm-recorder, exiting" "ERROR"
+				exit 0
+			fi
+		fi
+	}
+
+	function ensure_recorder_terminates_gracefully () {
+	local kasm_recorder_process="/dockerstartup/recorder/kasm_recorder_service"
+
+	while true
+	do
+		recorder_pid=$(pgrep -f "$kasm_recorder_process") || true
+		if [[ -z $recorder_pid ]]; then
+		break
+		fi
+
+		sleep 1
+	done
+	}
+
+	function start_nginx(){
+		echo start_nginx
+		log "Starting NGINX" "INFO"
+		NGINX_CONFIG=/etc/nginx/sites-available/default
+		# user passed env vars
+		CHPORT="${CUSTOM_HTTPS_PORT:-3001}"
+		
+		SFOLDER="${SUBFOLDER:-/}"
+		sudo chown 1001 -R /var/log/nginx /var/lib/nginx
+		sudo cp ./default.conf.template ${NGINX_CONFIG}
+		sudo sed -i "s/3000/$CPORT/g" ${NGINX_CONFIG}
+		sudo sed -i "s/3001/$CHPORT/g" ${NGINX_CONFIG}
+		sudo sed -i "s|SUBFOLDER|$SFOLDER|g" ${NGINX_CONFIG}
+
+		if [ ! -z ${DISABLE_IPV6+x} ]; then
+		sudo sed -i '/listen \[::\]/d' ${NGINX_CONFIG}
+		fi
+		if [ ! -z ${PASSWORD+x} ]; then
+		printf "${CUSER}:$(openssl passwd -apr1 ${PASSWORD})\n" | sudo tee /etc/nginx/.htpasswd
+		sudo sed -i 's/#//g' ${NGINX_CONFIG}
+		fi
+
+		/usr/sbin/nginx -c `pwd`/nginx.conf & 
+		KASM_PROCS['nginx']=$!
+	}
+
+	function start_kclient (){
+		log "Starting KClient" "INFO"
+		/usr/local/nvm/versions/node/v18.20.6/bin/node /opt/kclient/index.js &
+		KASM_PROCS['kclient']=$!
+	}
+
+	start_kasmvnc
+	# start_window_manager
+	start_audio_out_websocket
+	start_audio_out
+	start_audio_in
+	start_upload
+	start_nginx
+	start_kclient
+
+	## log connect options
+	echo -e "\n\n------------------ KasmVNC environment started ------------------"
+
+	# tail vncserver logs
+	# tail -f $HOME/.vnc/*$DISPLAY.log &
+	# KASM_PROCS['tail']=$!
+
+	sleep 3
+	while :
+	do
+		for process in "${!KASM_PROCS[@]}"; do
+			if ! kill -0 "${KASM_PROCS[$process]}" ; then
+
+				# If DLP Policy is set to fail secure, default is to be resilient
+				if [[ ${DLP_PROCESS_FAIL_SECURE:-0} == 1 ]]; then
+					log "DLP Policy violation, exiting container" "ERROR"
+					exit 1
+				fi
+
+				case $process in
+					kclient)
+						log "kclient not running, restarting" "WARNING"
+						start_kclient
+						;;
+					nginx)
+						log "nginx not running, restarting" "WARNING"
+						start_nginx
+						;;
+					kasmvnc)
+						if [ "$KASMVNC_AUTO_RECOVER" = true ] ; then
+							log "KasmVNC crashed, restarting" "WARNING"
+							start_kasmvnc
+						else
+							log "KasmVNC crashed, exiting container" "ERROR"
+							exit 1
+						fi
+						;;
+					# window_manager)
+					# 	log "Window manager crashed, restarting" "WARNING"
+
+					# 	# if [[ ${KASM_SVC_RECORDER:-0} == 1 ]]; then
+					# 	# 	log "Waiting for recorder service to upload all pending recordings"
+					# 	# 	ensure_recorder_terminates_gracefully
+					# 	# 	log "Recorder service has terminated, exiting container" "ERROR"
+					# 	# 	exit 1
+					# 	# fi
+
+					# 	start_window_manager
+					# 	;;
+					kasm_audio_out_websocket)
+						echo "Restarting Audio Out Websocket Service"
+						start_audio_out_websocket
+						;;
+					kasm_audio_out)
+						echo "Restarting Audio Out Service"
+						start_audio_out
+						;;
+					kasm_audio_in)
+						echo "Audio In Service Failed"
+						# TODO: Needs work in python project to support auto restart
+						# start_audio_in
+						;;
+					upload_server)
+						echo "Restarting Upload Service"
+						# TODO: This will only work if both processes are killed, requires more work
+						start_upload
+						;;
+					kasm_gamepad)
+						echo "Gamepad Service Failed"
+						# TODO: Needs work in python project to support auto restart
+						# start_gamepad
+						;;
+					*)
+						echo "Unknown Service: $process"
+						;;
+				esac
+			fi
+		done
+
+		# ensure_recorder_running
+
+		sleep 3
+	done
+)

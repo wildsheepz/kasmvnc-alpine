@@ -1,0 +1,175 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - v*  # Trigger the workflow on pushes to tags starting with 'v'
+  workflow_dispatch:
+    inputs:
+      tag: 
+        type: string
+        default: 
+        required: true
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+
+      - name: Get the tag name
+        if: ${{ inputs.tag }} != ''
+        id: get_tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" | tee -a $GITHUB_OUTPUT
+
+      - name: Check if release exists
+        if: ${{ steps.get_tag.outcome == 'success' }}
+        id: check_release
+        uses: actions/github-script@v6
+        with:
+          script: |
+            try {
+              const { data: release } = await github.rest.repos.getReleaseByTag({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                tag: '${{ steps.get_tag.outputs.tag }}'
+              });
+              console.log(release)
+              return release.id; // Return the release ID if it exists
+            } catch (error) {
+              if (error.status === 404) {
+                return false; // Return false if the release doesn't exist
+              }
+              throw error; // Re-throw the error if it's not a 404
+            }
+
+      - name: Delete existing release (if it exists)
+        if: ${{ steps.check_release.outputs.result }} != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete ${{ steps.get_tag.outputs.tag }} --yes
+          
+      - name: Create release
+        id: create_release
+        if: ${{ steps.get_tag.outcome == 'success' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create ${{ steps.get_tag.outputs.tag }} -t 'Release ${{ steps.get_tag.outputs.tag }}' 
+
+  build-scripts:
+    needs: [create-release]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - name: package the scripts
+        run: |-
+          ls -lah
+          tar -cvf scripts.tgz kasminit kasmvnc.yaml default.conf.template nginx.conf kasmvnc.service.template killall.sh install.sh ps.sh
+
+      - name: Get the tag name
+        if: ${{ inputs.tag }} != ''
+        id: get_tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" | tee -a $GITHUB_OUTPUT
+
+      - name: Upload release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |-
+          gh release upload ${{ steps.get_tag.outputs.tag }} scripts.tgz
+
+
+  build-root-package:
+    needs: [create-release]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+
+      - name: Get the tag name
+        if: ${{ inputs.tag }} != ''
+        id: get_tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" | tee -a $GITHUB_OUTPUT
+
+      # - name: Containerized Build
+      #   uses: ./build-www
+
+      # - name: file list
+      #   run: |-
+      #     # ls -lah ${{github.workspace}}
+      #     ls -lah ${{github.workspace}}/www
+
+      - name: Containerized Build
+        uses: ./build-out
+
+      - name: create tar
+        run: |-
+          # ls -lah ${{github.workspace}}
+          # ls -lah ${{github.workspace}}/out
+          (cd ${{github.workspace}}/out && tar -cvf ../root-package.tgz *)
+
+      - name: Upload release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |-
+          gh release upload ${{ steps.get_tag.outputs.tag }} ${{github.workspace}}/root-package.tgz
+
+
+  build-client:
+    needs: [create-release]
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+
+      - name: Get the tag name
+        if: ${{ inputs.tag }} != ''
+        id: get_tag
+        run: echo "tag=${GITHUB_REF#refs/tags/}" | tee -a $GITHUB_OUTPUT
+
+      - name: Containerized Build
+        uses: ./build-kclient
+
+      - name: create tar
+        run: |-
+          # ls -lah ${{github.workspace}}
+          # ls -lah ${{github.workspace}}/kclient
+          (cd ${{github.workspace}} && tar -cvf kclient.tgz kclient)
+
+      - name: Upload release asset
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |-
+          gh release upload ${{ steps.get_tag.outputs.tag }} ${{github.workspace}}/kclient.tgz

@@ -1,0 +1,8 @@
+runs:
+  using: "docker"
+  image: "Dockerfile"
+
+  args:
+    - /bin/bash
+    - -c
+    - 'cp -rv /kclient ./kclient'

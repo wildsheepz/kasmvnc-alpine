@@ -1,0 +1,13 @@
+[Unit]
+Description=KasmVnc
+After=network.target
+
+[Service]
+Type=simple
+User=${CUSER}
+ExecStart=/opt/kasm/kasminit
+Environment="DISPLAY_NUM=11"
+Environment="CUSTOM_PORT=6080"
+
+[Install]
+WantedBy=multi-user.target
